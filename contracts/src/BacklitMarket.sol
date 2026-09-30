@@ -25,8 +25,10 @@ contract BacklitMarket {
     /// the royalty in basis points directly.
     uint256 public constant BPS_DENOM = 10_000;
 
-    /// @notice A seller has three days to see a settlement through after
-    /// accepting; past that the buyer's funds are free again.
+    /// @notice The most a buyer has to see a settlement through after a seller
+    /// accepts. The offer's own expiry can cut that short, so the window the
+    /// buyer really has is `min(ACCEPT_WINDOW, expiresAt - acceptedAt)`; past
+    /// whichever comes first the buyer's funds are free again.
     uint256 public constant ACCEPT_WINDOW = 72 hours;
 
     /// @notice Ceiling on the flat fee, so the guardian can never price
@@ -336,7 +338,9 @@ contract BacklitMarket {
         emit OfferCancelled(offerId);
     }
 
-    /// @notice The seller takes the offer. The buyer then has three days to settle.
+    /// @notice The seller takes the offer. The buyer then has `ACCEPT_WINDOW`, or
+    /// whatever is left of the offer's expiry, whichever is shorter, to settle.
+    /// `Accepted` reports that deadline rather than the bare window.
     /// @param priceCommitment The commitment whose opening the seller read. An
     /// offer with any other is refused, so the seller accepts the price they
     /// saw whatever a page or an indexer said the offer id was.
@@ -359,7 +363,14 @@ contract BacklitMarket {
         o.acceptedAt = uint64(block.timestamp);
         // Fits: royaltyOf refuses anything above BPS_DENOM.
         o.acceptedRoyaltyBps = uint16(bps);
-        emit Accepted(offerId, uint64(block.timestamp) + uint64(ACCEPT_WINDOW));
+        // `settle` closes the offer at `expiresAt` as well as after the window,
+        // so the deadline reported here is the one that actually binds.
+        uint256 deadline = block.timestamp + ACCEPT_WINDOW;
+        if (o.expiresAt < deadline) deadline = o.expiresAt;
+        // Fits: the shorter of the two is never above `expiresAt`, which is a
+        // `uint64` in the first place.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        emit Accepted(offerId, uint64(deadline));
     }
 
     function unaccept(bytes32 offerId) external {

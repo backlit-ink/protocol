@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {Vm} from "forge-std/Vm.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {BacklitMarket} from "../src/BacklitMarket.sol";
@@ -260,6 +261,66 @@ contract MarketTest is BacklitTest {
         vm.warp(block.timestamp + market.ACCEPT_WINDOW() + 1);
         market.expireOffer(offerId);
         assertTrue(market.offerOf(offerId).cancelled);
+    }
+
+    /// @dev The deadline in `Accepted` has to be the one `settle` will honour.
+    /// With an offer that outlives the window that is now plus `ACCEPT_WINDOW`.
+    function test_acceptedReportsTheWindowWhenItIsTheBindingDeadline() public {
+        bytes32 listingId = mintAndList(1);
+        bytes32 offerId = openOffer(listingId, PRICE_COMMITMENT);
+        uint64 expected = uint64(block.timestamp) + uint64(market.ACCEPT_WINDOW());
+
+        vm.expectEmit(true, false, false, true, address(market));
+        emit BacklitMarket.Accepted(offerId, expected);
+        vm.prank(seller);
+        market.accept(offerId, PRICE_COMMITMENT, ROYALTY_BPS);
+
+        assertLt(expected, market.offerOf(offerId).expiresAt, "the window has to be the tighter of the two");
+    }
+
+    /// @dev A seller can accept seconds before the offer expires. The deadline
+    /// reported is then the expiry, because that is where `settle` stops.
+    function test_acceptedReportsTheOfferExpiryWhenItComesFirst() public {
+        bytes32 listingId = mintAndList(1);
+        vm.prank(buyer);
+        bytes32 offerId =
+            market.offer(listingId, PRICE_COMMITMENT, buyer, hex"", uint64(block.timestamp + 1 hours));
+
+        uint64 expected = market.offerOf(offerId).expiresAt;
+
+        vm.expectEmit(true, false, false, true, address(market));
+        emit BacklitMarket.Accepted(offerId, expected);
+        vm.prank(seller);
+        market.accept(offerId, PRICE_COMMITMENT, ROYALTY_BPS);
+
+        assertLt(expected, block.timestamp + market.ACCEPT_WINDOW(), "the expiry is inside the window");
+    }
+
+    /// @dev Whatever the event says, `settle` has to agree with it.
+    function test_theReportedDeadlineIsTheOneSettleHonours() public {
+        bytes32 root = _fund();
+        bytes32 listingId = mintAndList(1);
+        vm.prank(buyer);
+        bytes32 offerId =
+            market.offer(listingId, PRICE_COMMITMENT, buyer, hex"", uint64(block.timestamp + 1 hours));
+
+        vm.recordLogs();
+        vm.prank(seller);
+        market.accept(offerId, PRICE_COMMITMENT, ROYALTY_BPS);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint64 deadline;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == BacklitMarket.Accepted.selector) {
+                assertEq(logs[i].topics[1], offerId);
+                deadline = abi.decode(logs[i].data, (uint64));
+            }
+        }
+        assertEq(uint256(deadline), market.offerOf(offerId).expiresAt);
+
+        vm.warp(deadline - 1);
+        market.settle{value: FEE}(offerId, hex"00", settlePublic(root), emptyPayloads());
+        assertEq(IERC721(address(collection)).ownerOf(1), buyer, "the sale went through before the deadline");
     }
 
     function _accepted() internal returns (bytes32 listingId, bytes32 offerId) {
